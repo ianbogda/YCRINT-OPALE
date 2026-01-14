@@ -240,6 +240,16 @@
                   </div>
                 </div>
               </div>
+			  <div id="int19Card" class="card shadow-soft mt-3 d-none">
+				  <div class="card-body">
+					<div class="d-flex justify-content-between align-items-center">
+					  <h2 class="h6 mb-0">Synthèse métier – INT_19</h2>
+					  <span class="badge text-bg-secondary" id="int19StatusBadge">N/A</span>
+					</div>
+					<hr>
+					<div id="int19Summary" class="small"></div>
+				  </div>
+				</div>
             </div>
 
             <div class="col-12 col-lg-8">
@@ -418,7 +428,7 @@
  * @description
  *  - Outil OP@LE pour analyser et corriger des erreurs fonctionnelles
  */
-	const APP_VERSION = "YCRINT OP@LE - 0.1.0";
+	const APP_VERSION = "YCRINT OP@LE - 0.1.1";
 	window.addEventListener("DOMContentLoaded", () => {
 		const el = document.getElementById("app-version");
 		if (el) el.textContent = APP_VERSION;
@@ -477,6 +487,9 @@
     const allList = el('allList');
     const errTopList = el('errTopList');
     const modulesTable = el('modulesTable');
+	const int19Card = el('int19Card');
+	const int19Summary = el('int19Summary');
+	const int19StatusBadge = el('int19StatusBadge');
 
     const btnExportErrors = el('btnExportErrors');
     const btnCopyTop = el('btnCopyTop');
@@ -504,13 +517,10 @@
     // [01:13 21:01:41.987] [ERROR] - RESP  | ... | Erreur fonctionnelle : ...
     // [01:13 21:01:39.954] [ INFO] - TIERS | ...
     //
-    // We'll parse:
-    // - timeChunk: inside first []
-    // - level: inside second []
-    // - module: after "- " and before "|" (trim)
-    // - message: rest after first "|" (or full remainder)
-    //
-    const reLine = /^\s*\[(?<t>[^\]]+)\]\s*\[(?<lvl>[^\]]+)\]\s*-\s*(?<mod>[^|]+)\|\s*(?<msg>.*)\s*$/;
+	// Supporte 2 formats :
+	// 1) "- MOD | message"
+	// 2) "- message" (sans module explicite)
+	const reLine = /^\s*\[(?<t>[^\]]+)\]\s*\[(?<lvl>[^\]]+)\]\s*-\s*(?:(?<mod>[^|]+?)\s*\|\s*)?(?<msg>.*)\s*$/;
 
     function normalizeLevel(lvlRaw) {
       const x = (lvlRaw || '').toUpperCase().replace(/\s+/g,'').trim();
@@ -543,59 +553,89 @@
       return s.trim().slice(0, 140);
     }
 
-    function parseText(text) {
-      const ignoreEmpty = optIgnoreEmpty.checked;
-      const doExtract = optExtractKey.checked;
+	function parseText(text) {
+	  const ignoreEmpty = optIgnoreEmpty.checked;
+	  const doExtract = optExtractKey.checked;
 
-      const lines = text.split(/\r?\n/);
-      const out = [];
+	  const lines = text.split(/\r?\n/);
+	  const out = [];
 
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (ignoreEmpty && !line.trim()) continue;
+	  // Contexte "module" (ex: INT_19) déduit des lignes d'entête
+	  let ctxModule = '';
 
-        const m = reLine.exec(line);
-        if (m?.groups) {
-          const lvl = normalizeLevel(m.groups.lvl);
-          const mod = (m.groups.mod || '').trim();
-          const msg = (m.groups.msg || '').trim();
-          const base = {
-            idx: out.length,
-            raw: line,
-            time: (m.groups.t || '').trim(),
-            level: lvl,
-            module: mod,
-            message: msg,
-            ine: '',
-            personneID: '',
-            errorSig: ''
-          };
-          if (doExtract) {
-            const k = extractKeyFields(line);
-            base.ine = k.ine;
-            base.personneID = k.pid;
-          }
-          if (lvl === 'ERROR') {
-            base.errorSig = extractErrorSignature(msg);
-          }
-          out.push(base);
-        } else {
-          // fallback: unparsed line
-          out.push({
-            idx: out.length,
-            raw: line,
-            time: '',
-            level: 'OTHER',
-            module: '',
-            message: line.trim(),
-            ine: '',
-            personneID: '',
-            errorSig: ''
-          });
-        }
-      }
-      return out;
-    }
+	  // Détection interface : "Interface Sortante INT_19" / "Interface Entrante INT_12"
+	  const reInterface = /Interface\s+(?:Sortante|Entrante)\s+(?<int>INT_\d+)/i;
+
+	  // Lignes INFO mais qui signent un échec de traitement
+	  const reForceError = /(Traitement\s+termin[eé]\s+avec\s+erreurs|Interrompu)/i;
+
+	  for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (ignoreEmpty && !line.trim()) continue;
+
+		const m = reLine.exec(line);
+
+		if (m?.groups) {
+		  // Niveau brut -> normalisé
+		  let lvl = normalizeLevel(m.groups.lvl);
+
+		  // Message et module (module optionnel selon format)
+		  const msg = (m.groups.msg || '').trim();
+		  let mod = (m.groups.mod || '').trim();
+
+		  // Mise à jour du contexte si on rencontre l'entête d'interface
+		  const mi = reInterface.exec(msg);
+		  if (mi?.groups?.int) {
+			ctxModule = mi.groups.int.trim();
+		  }
+
+		  // Si aucun module explicite, on applique le contexte (INT_19)
+		  if (!mod && ctxModule) mod = ctxModule;
+
+		  // Requalification en ERROR sur mots-clés (même si tag INFO)
+		  if (reForceError.test(msg)) lvl = 'ERROR';
+
+		  const base = {
+			idx: out.length,
+			raw: line,
+			time: (m.groups.t || '').trim(),
+			level: lvl,
+			module: mod,
+			message: msg,
+			ine: '',
+			personneID: '',
+			errorSig: ''
+		  };
+
+		  if (doExtract) {
+			const k = extractKeyFields(line);
+			base.ine = k.ine;
+			base.personneID = k.pid;
+		  }
+
+		  if (lvl === 'ERROR') {
+			base.errorSig = extractErrorSignature(msg);
+		  }
+
+		  out.push(base);
+		} else {
+		  // fallback: unparsed line
+		  out.push({
+			idx: out.length,
+			raw: line,
+			time: '',
+			level: 'OTHER',
+			module: ctxModule || '',
+			message: line.trim(),
+			ine: '',
+			personneID: '',
+			errorSig: ''
+		  });
+		}
+	  }
+
+	  return out;
+	}
 
     function collapseDuplicates(list) {
       // Collapse by (level + module + message) and count occurrences
@@ -722,6 +762,146 @@
       dashboard.classList.remove('d-none');
       tabsBlock.classList.remove('d-none');
     }
+
+	function fmtMoneyFR(n) {
+	  const v = Number(n || 0);
+	  return new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
+	}
+
+	function computeInt19Summary(list) {
+	  // list = entries (éventuellement avec count si doublons regroupés)
+	  const int19 = list.filter(e => (e.module || '').trim().toUpperCase() === 'INT_19');
+	  if (!int19.length) return null;
+
+	  // Patterns INT_19
+	  const reNbAEnvoyer = /Nombre\s+de\s+cr[eé]ances\s+à\s+envoyer\s*:\s*(?<n>\d+)/i;
+	  const reNbXml = /Nombre\s+de\s+cr[eé]ance\(s\)\s+[ée]crite\s+dans\s+le\s+fichier\s+xml\s*:\s*(?<n>\d+)/i;
+
+	  const reCreanceLine = /Num[ée]ro\s+cr[eé]ance\s*:\s*(?<num>[^,]+),\s*El[èe]ve\s*:\s*(?<eleve>[^,]+),\s*Montant\s*:\s*(?<mnt>[\d.,]+)/i;
+
+	  const reXmlGen = /Fichier\s+XML\s+g[eé]n[eé]r[eé]\s*:\s*\[(?<path>[^\]]+)\]/i;
+	  const reSendFile = /Envoi\s+du\s+fichier\s*:\s*(?<path>\/\S+)/i;
+
+	  const reEtape = /Etape\s+(?<n>\d+)\s*-\s*(?<label>.+)$/i;
+	  const reInterrompu = /Interrompu/i;
+	  const reTermineErreurs = /Traitement\s+termin[eé]\s+avec\s+erreurs/i;
+
+	  let nbAEnvoyer = null;
+	  let nbXml = null;
+
+	  let xmlFile = '';
+	  let totalMontant = 0;
+	  let nbCreancesDetail = 0;
+
+	  let lastEtape = '';
+	  let failingEtape = '';
+	  let hasError = false;
+
+	  // Parcours dans l’ordre d’apparition (firstIdx si présent, sinon idx)
+	  const sorted = [...int19].sort((a,b) => (a.firstIdx ?? a.idx) - (b.firstIdx ?? b.idx));
+
+	  for (const e of sorted) {
+		const msg = (e.message || '').trim();
+		const k = (e.count || 1);
+
+		// Compteurs
+		const m1 = reNbAEnvoyer.exec(msg);
+		if (m1?.groups?.n) nbAEnvoyer = parseInt(m1.groups.n, 10);
+
+		const m2 = reNbXml.exec(msg);
+		if (m2?.groups?.n) nbXml = parseInt(m2.groups.n, 10);
+
+		// Détails créances
+		const mc = reCreanceLine.exec(msg);
+		if (mc?.groups?.mnt) {
+		  const raw = mc.groups.mnt.replace(',', '.');
+		  const montant = parseFloat(raw);
+		  if (!Number.isNaN(montant)) {
+			totalMontant += montant * k;
+			nbCreancesDetail += 1 * k;
+		  }
+		}
+
+		// Fichier XML
+		const mx = reXmlGen.exec(msg);
+		if (mx?.groups?.path) xmlFile = mx.groups.path.trim();
+
+		const ms = reSendFile.exec(msg);
+		if (!xmlFile && ms?.groups?.path) xmlFile = ms.groups.path.trim();
+
+		// Suivi étape + échec
+		const me = reEtape.exec(msg);
+		if (me?.groups?.n && me?.groups?.label) {
+		  lastEtape = `Etape ${me.groups.n} - ${me.groups.label.trim()}`;
+		  if (reInterrompu.test(me.groups.label)) {
+			failingEtape = `Etape ${me.groups.n} - ${me.groups.label.trim()}`;
+		  }
+		}
+
+		if ((e.level || '').toUpperCase() === 'ERROR') {
+		  hasError = true;
+		  // Si "Traitement terminé avec erreurs", on attribue l’étape courante si on ne l’a pas déjà.
+		  if (reTermineErreurs.test(msg) && !failingEtape) {
+			failingEtape = lastEtape || 'Traitement terminé avec erreurs';
+		  }
+		  // Si "Interrompu" isolé (au cas où), idem
+		  if (reInterrompu.test(msg) && !failingEtape) {
+			failingEtape = lastEtape || msg;
+		  }
+		}
+	  }
+
+	  // Choix nb “métier” : priorité à l’entête, sinon au détail, sinon au nb XML.
+	  const nbCreances =
+		(typeof nbAEnvoyer === 'number' ? nbAEnvoyer :
+		(nbCreancesDetail ? nbCreancesDetail :
+		(typeof nbXml === 'number' ? nbXml : 0)));
+
+	  return {
+		nbCreances,
+		totalMontant,
+		xmlFile,
+		failingEtape: failingEtape || (hasError ? 'Traitement en erreur (étape non déterminée)' : ''),
+		hasError
+	  };
+	}
+
+	function renderInt19Summary(list) {
+	  const s = computeInt19Summary(list);
+
+	  if (!s) {
+		int19Card.classList.add('d-none');
+		int19Summary.innerHTML = '';
+		int19StatusBadge.textContent = 'N/A';
+		int19StatusBadge.className = 'badge text-bg-secondary';
+		return;
+	  }
+
+	  int19Card.classList.remove('d-none');
+
+	  if (s.hasError) {
+		int19StatusBadge.textContent = 'ERREUR';
+		int19StatusBadge.className = 'badge text-bg-danger';
+	  } else {
+		int19StatusBadge.textContent = 'OK';
+		int19StatusBadge.className = 'badge text-bg-success';
+	  }
+
+	  const html = `
+		<div class="vstack gap-2">
+		  <div><span class="small-muted">Créances :</span> <strong>${s.nbCreances}</strong></div>
+		  <div><span class="small-muted">Total montants :</span> <strong>${fmtMoneyFR(s.totalMontant)} €</strong></div>
+		  <div><span class="small-muted">Fichier XML :</span><br>
+			<code style="word-break:break-all;">${escapeHtml(s.xmlFile || '—')}</code>
+		  </div>
+		  <div><span class="small-muted">Étape d’échec :</span><br>
+			<strong>${escapeHtml(s.failingEtape || '—')}</strong>
+		  </div>
+		</div>
+	  `;
+
+	  int19Summary.innerHTML = html;
+	}
 
     function renderAllList(list) {
       const filtered = getFiltered(list);
@@ -948,6 +1128,7 @@
       const list = entries;
 
       renderDashboard(list);
+	  renderInt19Summary(list);
       renderErrors(list);
       renderAllList(list);
       renderModules(list);
